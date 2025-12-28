@@ -1,5 +1,6 @@
 ;=============================================================================
-; PROJECT: BOARD #1 - HOME AC SYSTEM (PIC16F877A) - FINAL
+; Author:Serkan Sevmez
+; PROJECT: BOARD #1 - HOME AC SYSTEM (PIC16F877A)
 ; NOTES:
 ; - ADCON1 fixed to read correct analog value (prevents constant 255).
 ; - UART SET commands update display variables.
