@@ -1,0 +1,755 @@
+;=============================================================================
+; PROJECT: BOARD #1 - HOME AC SYSTEM (PIC16F877A) - FINAL
+; XC8 PIC-AS VERSION
+;=============================================================================
+
+    PROCESSOR 16F877A
+    #include <xc.inc>
+
+;--- Konfigurasyon ---
+    CONFIG FOSC = XT
+    CONFIG WDTE = OFF
+    CONFIG PWRTE = OFF
+    CONFIG BOREN = OFF
+    CONFIG LVP = OFF
+    CONFIG CP = OFF
+
+;----------------------------- RAM MAP (Variables) ---------------------------
+    PSECT udata_bank0
+    ; Display / keypad
+D1:                 DS 1
+D2:                 DS 1
+D3:                 DS 1
+D4:                 DS 1
+T1:                 DS 1
+T2:                 DS 1
+T3:                 DS 1
+T4:                 DS 1
+ENTRY_MODE:         DS 1
+KEY_VAL:            DS 1
+
+    ; System
+ADC_L:              DS 1
+ADC_H:              DS 1
+TEMP_VAL:           DS 1
+TARGET_TEMP:        DS 1
+RPM_VAL:            DS 1
+
+    ; Conversions / display cache
+TEMP_100:           DS 1
+TEMP_10:            DS 1
+TEMP_1:             DS 1
+USER_D1:            DS 1
+USER_D2:            DS 1
+USER_D3:            DS 1
+USER_D4:            DS 1
+DISP_ACTIVE:        DS 1
+
+    ; Counters / timing
+LOOP_COUNT:         DS 1
+DELAY_VAR:          DS 1
+KEY_DELAY:          DS 1
+SAMPLE_TIME:        DS 1
+TEMP_CALC:          DS 1
+
+    ; UART data registers (protocol)
+DESIRED_TEMP_FRAC:  DS 1
+DESIRED_TEMP_INT:   DS 1
+AMBIENT_TEMP_FRAC:  DS 1
+AMBIENT_TEMP_INT:   DS 1
+FAN_SPEED:          DS 1
+UART_TEMP:          DS 1
+
+;-------------------------- RESET VECTOR -------------------------------------
+    PSECT res_vect, class=CODE, delta=2
+    ORG 0x00
+    GOTO    START
+
+;-------------------------- MAIN CODE SECTION --------------------------------
+    PSECT code
+    
+;-------------------------- 7-SEGMENT LOOKUP TABLE --------------------------
+GET_SEG:
+    ADDWF   PCL, F
+    RETLW   00111111B ; 0
+    RETLW   00000110B ; 1
+    RETLW   01011011B ; 2
+    RETLW   01001111B ; 3
+    RETLW   01100110B ; 4
+    RETLW   01101101B ; 5
+    RETLW   01111101B ; 6
+    RETLW   00000111B ; 7
+    RETLW   01111111B ; 8
+    RETLW   01101111B ; 9
+    RETLW   01110111B ; A
+    RETLW   01111100B ; B
+    RETLW   00111001B ; C
+    RETLW   01011110B ; D
+    RETLW   00001000B ; '_' (degree placeholder)
+    RETLW   01110001B ; F (fan mode)
+
+;=============================================================================
+; INIT
+;=============================================================================
+START:
+    ; Bank 1: I/O directions and peripherals
+    BANKSEL TRISD       ; XC8 Macro for Bank Switching
+    
+    CLRF    TRISD       ; 7-seg segments output (PORTD)
+
+    MOVLW   00010000B   ; RA4 input (tach), others output (digit selects)
+    MOVWF   TRISA
+
+    BSF     TRISE, 0    ; RE0 input (AN5)
+
+    BCF     TRISC, 0    ; Heater LED output
+    BCF     TRISC, 1    ; Cooler/Fan LED output
+
+    BCF     TRISC, 6    ; TX output
+    BSF     TRISC, 7    ; RX input
+
+    MOVLW   0xF0        ; Keypad: RB4..RB7 input, RB0..RB3 output
+    MOVWF   TRISB
+
+    MOVLW   00101000B   ; TMR0 counter mode configuration
+    MOVWF   OPTION_REG
+
+    MOVLW   10000000B   ; ADFM=1, PCFG=0000 (all analog)
+    MOVWF   ADCON1
+
+    ; UART 9600 @ 4MHz
+    MOVLW   25
+    MOVWF   SPBRG
+    BCF     TXSTA, 4    ; SYNC
+    BSF     TXSTA, 2    ; BRGH
+    BSF     TXSTA, 5    ; TXEN
+
+    ; Back to Bank 0
+    BANKSEL PORTA
+
+    ; ADC: Fosc/32, CH5 (AN5/RE0), ADON=1
+    MOVLW   10101001B
+    MOVWF   ADCON0
+
+    ; UART RX enable
+    BSF     RCSTA, 7    ; SPEN
+    BSF     RCSTA, 4    ; CREN
+
+    ; Init variables
+    CLRF    PORTC
+    CLRF    D1
+    CLRF    D2
+    CLRF    D3
+    CLRF    D4
+    CLRF    ENTRY_MODE
+    CLRF    DISP_ACTIVE
+
+    CLRF    DESIRED_TEMP_INT
+    CLRF    DESIRED_TEMP_FRAC
+    CLRF    AMBIENT_TEMP_INT
+    CLRF    AMBIENT_TEMP_FRAC
+    CLRF    FAN_SPEED
+
+    CALL    WAIT_KEY_RELEASE
+
+;=============================================================================
+; MAIN LOOP
+;=============================================================================
+MAIN_LOOP:
+    CALL    SHOW_DISPLAY
+    CALL    UART_Check
+
+    CALL    SCAN_KEYPAD
+    MOVWF   KEY_VAL
+
+    XORLW   0xFF
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    MAIN_LOOP
+
+    MOVLW   50
+    MOVWF   LOOP_COUNT
+DEBOUNCE:
+    CALL    SHOW_DISPLAY
+    DECFSZ  LOOP_COUNT, F
+    GOTO    DEBOUNCE
+
+    ; Key 'A' enters input mode
+    MOVF    KEY_VAL, W
+    XORLW   0x0A
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    CHECK_HASH
+
+    BSF     DISP_ACTIVE, 0
+    MOVLW   1
+    MOVWF   ENTRY_MODE
+    CLRF    T1
+    CLRF    T2
+    CLRF    T3
+    CLRF    T4
+    CLRF    PORTC
+    GOTO    RELEASE_WAIT
+
+CHECK_HASH:
+    ; Key '#': validate and save
+    MOVF    KEY_VAL, W
+    XORLW   0x0F
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    CHECK_NUM
+
+    BTFSS   ENTRY_MODE, 0
+    GOTO    RELEASE_WAIT
+
+    ; Range check: 10.0 .. 50.0
+    MOVF    T1, F
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    TURN_OFF_SCREEN
+
+    MOVLW   6
+    SUBWF   T1, W
+    BTFSC   STATUS, 0   ; C bit
+    GOTO    TURN_OFF_SCREEN
+
+    MOVLW   5
+    SUBWF   T1, W
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    SAVE_DATA_CORRECTED
+
+    MOVF    T2, F
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    TURN_OFF_SCREEN
+
+    MOVF    T4, F
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    TURN_OFF_SCREEN
+
+SAVE_DATA_CORRECTED:
+    MOVF    T1, W
+    MOVWF   USER_D1
+    MOVF    T2, W
+    MOVWF   USER_D2
+    MOVF    T3, W
+    MOVWF   USER_D3
+    MOVF    T4, W
+    MOVWF   USER_D4
+
+    MOVF    T4, W
+    MOVWF   DESIRED_TEMP_FRAC
+
+    CLRF    DESIRED_TEMP_INT
+
+    MOVF    T1, W
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    ADD_ONES
+
+    MOVWF   LOOP_COUNT
+MULT_LOOP:
+    MOVLW   10
+    ADDWF   DESIRED_TEMP_INT, F
+    DECFSZ  LOOP_COUNT, F
+    GOTO    MULT_LOOP
+
+ADD_ONES:
+    MOVF    T2, W
+    ADDWF   DESIRED_TEMP_INT, F
+
+    CLRF    ENTRY_MODE
+    GOTO    ALTERNATE_LOOP
+
+TURN_OFF_SCREEN:
+    CLRF    DISP_ACTIVE
+    CLRF    ENTRY_MODE
+    CLRF    PORTD
+    GOTO    MAIN_LOOP
+
+CHECK_NUM:
+    BTFSS   ENTRY_MODE, 0
+    GOTO    RELEASE_WAIT
+
+    ; Key '*' acts as a shift/decimal entry
+    MOVF    KEY_VAL, W
+    XORLW   0x0E
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    DO_SHIFT
+
+    ; Only accept 0..9
+    MOVLW   0x0A
+    SUBWF   KEY_VAL, W
+    BTFSC   STATUS, 0   ; C bit
+    GOTO    RELEASE_WAIT
+
+DO_SHIFT:
+    MOVF    T2, W
+    MOVWF   T1
+    MOVF    T3, W
+    MOVWF   T2
+    MOVF    T4, W
+    MOVWF   T3
+    MOVF    KEY_VAL, W
+    MOVWF   T4
+
+    MOVF    T1, W
+    MOVWF   D1
+    MOVF    T2, W
+    MOVWF   D2
+    MOVF    T3, W
+    MOVWF   D3
+    MOVF    T4, W
+    MOVWF   D4
+
+RELEASE_WAIT:
+    CALL    SHOW_DISPLAY
+    CALL    UART_Check
+    CALL    SCAN_KEYPAD
+    XORLW   0xFF
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    RELEASE_WAIT
+    GOTO    MAIN_LOOP
+
+;=============================================================================
+; ALTERNATE DISPLAY / CONTROL LOOP
+;=============================================================================
+ALTERNATE_LOOP:
+    ; 1) Show user setpoint
+    MOVF    USER_D1, W
+    MOVWF   D1
+    MOVF    USER_D2, W
+    MOVWF   D2
+    MOVF    USER_D3, W
+    MOVWF   D3
+    MOVF    USER_D4, W
+    MOVWF   D4
+    CALL    DELAY_CHECK_A_2SEC
+
+    ; 2) Read ambient temperature + control outputs
+    CALL    READ_TEMP_SAFE
+    CALL    CONTROL_LEDS
+    CALL    DELAY_CHECK_A_2SEC
+
+    ; 3) Read fan speed and show
+    CALL    READ_RPM_AND_DISPLAY
+    GOTO    ALTERNATE_LOOP
+
+;=============================================================================
+; SUBROUTINES
+;=============================================================================
+
+READ_RPM_AND_DISPLAY:
+    CLRF    TMR0
+
+    MOVLW   15
+    MOVWF   D1
+    CLRF    D2
+    CLRF    D3
+    CLRF    D4
+
+    MOVLW   2
+    MOVWF   ADC_H
+RPM_LOOP_OUT:
+    MOVLW   200
+    MOVWF   SAMPLE_TIME
+RPM_LOOP_IN:
+    CALL    SHOW_DISPLAY
+    CALL    UART_Check
+    DECFSZ  SAMPLE_TIME, F
+    GOTO    RPM_LOOP_IN
+    DECFSZ  ADC_H, F
+    GOTO    RPM_LOOP_OUT
+
+    MOVF    TMR0, W
+    MOVWF   RPM_VAL
+    MOVWF   FAN_SPEED
+
+    CLRF    TEMP_100
+    CLRF    TEMP_10
+    CLRF    TEMP_1
+    MOVF    RPM_VAL, W
+    MOVWF   TEMP_VAL
+
+C100_R:
+    MOVLW   100
+    SUBWF   TEMP_VAL, W
+    BTFSS   STATUS, 0   ; C bit
+    GOTO    C10_R
+    MOVWF   TEMP_VAL
+    INCF    TEMP_100, F
+    GOTO    C100_R
+
+C10_R:
+    MOVLW   10
+    SUBWF   TEMP_VAL, W
+    BTFSS   STATUS, 0   ; C bit
+    GOTO    C1_R
+    MOVWF   TEMP_VAL
+    INCF    TEMP_10, F
+    GOTO    C10_R
+
+C1_R:
+    MOVF    TEMP_VAL, W
+    MOVWF   TEMP_1
+
+    MOVF    TEMP_100, W
+    MOVWF   D2
+    MOVF    TEMP_10, W
+    MOVWF   D3
+    MOVF    TEMP_1, W
+    MOVWF   D4
+
+    CALL    DELAY_CHECK_A_2SEC
+    RETURN
+
+CONTROL_LEDS:
+    CLRF    TARGET_TEMP
+
+    MOVF    USER_D1, W
+    MOVWF   LOOP_COUNT
+    MOVF    LOOP_COUNT, F
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    ADD_ONES_LEDS
+
+CALC_TENS_LEDS:
+    MOVLW   10
+    ADDWF   TARGET_TEMP, F
+    DECFSZ  LOOP_COUNT, F
+    GOTO    CALC_TENS_LEDS
+
+ADD_ONES_LEDS:
+    MOVF    USER_D2, W
+    ADDWF   TARGET_TEMP, F
+
+COMPARE_NOW:
+    BCF     PORTC, 0
+    BCF     PORTC, 1
+
+    MOVF    TEMP_VAL, W
+    SUBWF   TARGET_TEMP, W
+    BTFSC   STATUS, 2   ; Z bit
+    RETURN
+
+    BTFSC   STATUS, 0   ; C bit
+    GOTO    KEYPAD_BIGGER
+    GOTO    KEYPAD_SMALLER
+
+KEYPAD_BIGGER:
+    BSF     PORTC, 0
+    RETURN
+
+KEYPAD_SMALLER:
+    BSF     PORTC, 1
+    RETURN
+
+SHOW_DISPLAY:
+    BTFSS   DISP_ACTIVE, 0
+    RETURN
+
+    MOVF    D1, W
+    CALL    GET_SEG
+    MOVWF   PORTD
+    BSF     PORTA, 0
+    CALL    WAIT_1MS
+    BCF     PORTA, 0
+    CLRF    PORTD
+
+    MOVF    D2, W
+    CALL    GET_SEG
+    MOVWF   PORTD
+    BSF     PORTA, 1
+    CALL    WAIT_1MS
+    BCF     PORTA, 1
+    CLRF    PORTD
+
+    MOVF    D3, W
+    CALL    GET_SEG
+    MOVWF   PORTD
+    BSF     PORTA, 2
+    CALL    WAIT_1MS
+    BCF     PORTA, 2
+    CLRF    PORTD
+
+    MOVF    D4, W
+    CALL    GET_SEG
+    MOVWF   PORTD
+    BSF     PORTA, 3
+    CALL    WAIT_1MS
+    BCF     PORTA, 3
+    CLRF    PORTD
+    RETURN
+
+WAIT_1MS:
+    MOVLW   200
+    MOVWF   DELAY_VAR
+DLY_L:
+    DECFSZ  DELAY_VAR, F
+    GOTO    DLY_L
+    RETURN
+
+DELAY_CHECK_A_2SEC:
+    MOVLW   2
+    MOVWF   ADC_H
+DL_OUT:
+    MOVLW   200
+    MOVWF   LOOP_COUNT
+DL_IN:
+    CALL    SHOW_DISPLAY
+    CALL    UART_Check
+    CALL    SCAN_KEYPAD
+    XORLW   0x0A
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    SYSTEM_RESET
+
+    DECFSZ  LOOP_COUNT, F
+    GOTO    DL_IN
+    DECFSZ  ADC_H, F
+    GOTO    DL_OUT
+    RETURN
+
+SYSTEM_RESET:
+    CLRF    PORTC
+    GOTO    START
+
+READ_TEMP_SAFE:
+    BANKSEL ADCON1
+    MOVLW   10000000B
+    MOVWF   ADCON1
+    BANKSEL ADCON0
+
+    BSF     ADCON0, 2   ; GO/DONE Bit
+W_ADC:
+    BTFSC   ADCON0, 2
+    GOTO    W_ADC
+
+    BANKSEL ADRESL
+    MOVF    ADRESL, W
+    BANKSEL ADC_L
+    MOVWF   ADC_L
+    BANKSEL ADRESH
+    MOVF    ADRESH, W
+    BANKSEL ADC_H
+    MOVWF   ADC_H
+
+    BANKSEL ADCON1
+    MOVLW   00000110B
+    MOVWF   ADCON1
+    BANKSEL PORTA
+
+    BCF     STATUS, 0   ; C bit
+    RRF     ADC_H, F
+    RRF     ADC_L, F
+    MOVF    ADC_L, W
+    MOVWF   TEMP_VAL
+
+    MOVWF   AMBIENT_TEMP_INT
+    CLRF    AMBIENT_TEMP_FRAC
+
+    CLRF    TEMP_100
+    CLRF    TEMP_10
+    CLRF    TEMP_1
+
+C100:
+    MOVLW   100
+    SUBWF   TEMP_VAL, W
+    BTFSS   STATUS, 0   ; C bit
+    GOTO    C10
+    MOVWF   TEMP_VAL
+    INCF    TEMP_100, F
+    GOTO    C100
+C10:
+    MOVLW   10
+    SUBWF   TEMP_VAL, W
+    BTFSS   STATUS, 0   ; C bit
+    GOTO    C1
+    MOVWF   TEMP_VAL
+    INCF    TEMP_10, F
+    GOTO    C10
+C1:
+    MOVF    TEMP_VAL, W
+    MOVWF   TEMP_1
+
+    MOVF    TEMP_10, W
+    MOVWF   D1
+    MOVF    TEMP_1, W
+    MOVWF   D2
+    MOVLW   14
+    MOVWF   D3
+    MOVLW   0
+    MOVWF   D4
+
+    MOVF    ADC_L, W
+    MOVWF   TEMP_VAL
+    RETURN
+
+WAIT_KEY_RELEASE:
+    CALL    SHOW_DISPLAY
+    CALL    SCAN_KEYPAD
+    XORLW   0xFF
+    BTFSS   STATUS, 2   ; Z bit
+    GOTO    WAIT_KEY_RELEASE
+    RETURN
+
+SCAN_KEYPAD:
+    BANKSEL TRISB
+    MOVLW   0xF0
+    MOVWF   TRISB
+    BANKSEL PORTB
+
+    MOVLW   11111110B
+    MOVWF   PORTB
+    CALL    KEY_WAIT
+    BTFSS   PORTB, 4
+    RETLW   0x01
+    BTFSS   PORTB, 5
+    RETLW   0x02
+    BTFSS   PORTB, 6
+    RETLW   0x03
+    BTFSS   PORTB, 7
+    RETLW   0x0A
+
+    MOVLW   11111101B
+    MOVWF   PORTB
+    CALL    KEY_WAIT
+    BTFSS   PORTB, 4
+    RETLW   0x04
+    BTFSS   PORTB, 5
+    RETLW   0x05
+    BTFSS   PORTB, 6
+    RETLW   0x06
+    BTFSS   PORTB, 7
+    RETLW   0x0B
+
+    MOVLW   11111011B
+    MOVWF   PORTB
+    CALL    KEY_WAIT
+    BTFSS   PORTB, 4
+    RETLW   0x07
+    BTFSS   PORTB, 5
+    RETLW   0x08
+    BTFSS   PORTB, 6
+    RETLW   0x09
+    BTFSS   PORTB, 7
+    RETLW   0x0C
+
+    MOVLW   11110111B
+    MOVWF   PORTB
+    CALL    KEY_WAIT
+    BTFSS   PORTB, 4
+    RETLW   0x0E
+    BTFSS   PORTB, 5
+    RETLW   0x00
+    BTFSS   PORTB, 6
+    RETLW   0x0F
+    BTFSS   PORTB, 7
+    RETLW   0x0D
+
+    RETLW   0xFF
+
+KEY_WAIT:
+    MOVLW   50
+    MOVWF   KEY_DELAY
+K_LOOP:
+    DECFSZ  KEY_DELAY, F
+    GOTO    K_LOOP
+    RETURN
+
+;=============================================================================
+; UART PROTOCOL
+;=============================================================================
+UART_Check:
+    BANKSEL PIR1
+    BTFSS   PIR1, 5     ; RCIF
+    RETURN
+
+    BANKSEL RCREG
+    MOVF    RCREG, W
+    BANKSEL UART_TEMP
+    MOVWF   UART_TEMP
+
+    BTFSC   UART_TEMP, 7
+    GOTO    Handle_Set
+
+    MOVF    UART_TEMP, W
+    XORLW   00000001B
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    S_Des_F
+
+    MOVF    UART_TEMP, W
+    XORLW   00000010B
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    S_Des_I
+
+    MOVF    UART_TEMP, W
+    XORLW   00000011B
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    S_Amb_F
+
+    MOVF    UART_TEMP, W
+    XORLW   00000100B
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    S_Amb_I
+
+    MOVF    UART_TEMP, W
+    XORLW   00000101B
+    BTFSC   STATUS, 2   ; Z bit
+    GOTO    S_Fan
+
+    RETURN
+
+Handle_Set:
+    BTFSS   UART_TEMP, 6
+    GOTO    Set_Des_Low
+    GOTO    Set_Des_High
+
+Set_Des_Low:
+    MOVF    UART_TEMP, W
+    ANDLW   00111111B
+    MOVWF   DESIRED_TEMP_FRAC
+    MOVWF   USER_D4
+    RETURN
+
+Set_Des_High:
+    MOVF    UART_TEMP, W
+    ANDLW   00111111B
+    MOVWF   DESIRED_TEMP_INT
+
+    CLRF    USER_D1
+    MOVF    DESIRED_TEMP_INT, W
+    MOVWF   TEMP_CALC
+
+Check_Tens_Loop:
+    MOVLW   10
+    SUBWF   TEMP_CALC, W
+    BTFSS   STATUS, 0   ; C bit
+    GOTO    Tens_Done
+    MOVWF   TEMP_CALC
+    INCF    USER_D1, F
+    GOTO    Check_Tens_Loop
+
+Tens_Done:
+    MOVF    TEMP_CALC, W
+    MOVWF   USER_D2
+    RETURN
+
+S_Des_F:
+    MOVF    DESIRED_TEMP_FRAC, W
+    GOTO    Tx_Byte
+S_Des_I:
+    MOVF    DESIRED_TEMP_INT, W
+    GOTO    Tx_Byte
+S_Amb_F:
+    MOVF    AMBIENT_TEMP_FRAC, W
+    GOTO    Tx_Byte
+S_Amb_I:
+    MOVF    AMBIENT_TEMP_INT, W
+    GOTO    Tx_Byte
+S_Fan:
+    MOVF    FAN_SPEED, W
+    GOTO    Tx_Byte
+
+Tx_Byte:
+    BANKSEL PIR1
+    BTFSS   PIR1, 4     ; TXIF
+    GOTO    Tx_Byte
+    BANKSEL TXREG
+    MOVWF   TXREG
+    BANKSEL PORTA       ; Return to default bank
+    RETURN
+
+    END
