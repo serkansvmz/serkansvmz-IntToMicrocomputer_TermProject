@@ -1,14 +1,36 @@
+# =============================================================================
+# HOME AUTOMATION SYSTEM - PYTHON SERIAL INTERFACE
+# =============================================================================
+# This program provides a serial communication interface between a PC and
+# two microcontroller-based home automation boards.
+#
+# Board #1 (Air Conditioner System):
+# - Reads ambient temperature
+# - Reads user-defined desired temperature
+# - Reads fan speed (rps)
+# - Allows the user to update the desired temperature
+#
+# Board #2 (Curtain Control System):
+# - Reads curtain status (%)
+# - Reads outdoor temperature
+# - Reads outdoor pressure (calculated according to PIC firmware logic)
+# - Reads light intensity
+# - Allows the user to update curtain opening percentage
+#
+# Author: Serkan SEVMEZ, Tolga ÇAYCI, Yusuf Eren KURUL
+# Course: INTRODUCTION TO MICROCOMPUTERS 
+
 import serial
 import time
 import struct
 import sys
 
 # =============================================================================
-# AYARLAR
+# SETTINGS
 # =============================================================================
-PORT_AC = 'COM10'  # Board #1 (Klima)
-PORT_CURTAIN = 'COM11'  # Board #2 (Perde)
-BAUD_RATE = 9600  # Simülasyon hızı
+PORT_AC = 'COM10'  # Board #1
+PORT_CURTAIN = 'COM11'  # Board #2
+BAUD_RATE = 9600  # Simulation speed
 
 
 # =============================================================================
@@ -24,16 +46,16 @@ class HomeAutomationSystemConnection:
     def open(self):
         try:
             self.ser = serial.Serial(self.comPort, self.baudRate, timeout=2)
-            print(f"[BAĞLANTI] {self.comPort} açıldı.")
+            print(f"[CONNECTION] {self.comPort} opened.")
             return True
         except Exception as e:
-            print(f"[HATA] {self.comPort} açılamadı: {e}")
+            print(f"[ERROR] {self.comPort} could not be opened: {e}")
             return False
 
     def close(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
-            print(f"[BAĞLANTI] {self.comPort} kapatıldı.")
+            print(f"[CONNECTION] {self.comPort} closed.")
 
     def send_byte(self, byte_val):
         if self.ser and self.ser.is_open:
@@ -65,21 +87,21 @@ class AirConditionerSystemConnection(HomeAutomationSystemConnection):
         self.fanSpeed = 0
 
     def update(self):
-        # 1. Ortam Sicakligi
+        # 1. Ambient Temperature
         self.send_byte(0x04)
         amb_int = self.read_byte()
         self.send_byte(0x03)
         amb_frac = self.read_byte()
         self.ambientTemperature = float(f"{amb_int}.{amb_frac}")
 
-        # 2. İstenen Sıcaklık
+        # 2. Desired Temperature
         self.send_byte(0x02)
         des_int = self.read_byte()
         self.send_byte(0x01)
         des_frac = self.read_byte()
         self.desiredTemperature = float(f"{des_int}.{des_frac}")
 
-        # 3. Fan Hızı
+        # 3. Fan Speed
         self.send_byte(0x05)
         self.fanSpeed = self.read_byte()
 
@@ -129,34 +151,33 @@ class CurtainControlSystemConnection(HomeAutomationSystemConnection):
         t_frac = self.read_byte()
         self.outdoorTemperature = float(f"{t_int}.{t_frac}")
 
-        # 3. Outdoor Pressure (DÜZELTİLDİ: PIC ile %100 Uyumlu Hesaplama)
+        # 3. Outdoor Pressure 
         self.send_byte(0x06)  # Get High
         p_int = self.read_byte()
         self.send_byte(0x05)  # Get Low
         p_frac = self.read_byte()
 
-        # --- PIC ASSEMBLY TAKLİT ALGORİTMASI ---
-        # PIC kodu: (Raw * 1.5) işlemini yaparken 8-bit taşması yaşıyor.
-        # Biz de aynısını yapıyoruz:
-        raw_val = p_int
+        # --- PIC Assembly Simulation Algorithm ---
+        # PIC code: It experiences an 8-bit overflow while performing the (Raw * 1.5) operation. 
+        # We are doing the same thing:raw_val = p_int
         calc_val = int(raw_val * 1.5)
 
-        # 8-bit Taşma (Overflow) Simülasyonu
+        # 8-bit Overflow Simulation
         calc_val = calc_val % 256
 
-        # PIC Kodu: 150'den büyükse 150'ye sabitle
+        # PIC Code: If greater than 150, set it to 150.
         if calc_val > 150:
             calc_val = 150
 
-        # PIC Kodu: 50 ekle
+        # PIC Code: Add 50
         calc_val += 50
 
-        # PIC Kodu: LCD'ye "10" yaz, sonra Yüzler ve Onlar basamağını yaz (Birler yok!)
-        # Örn: calc_val=95 ise -> Yüzler=0, Onlar=9 -> Ekrana "1009" yazar.
+        # PIC Code: Print "10" to the LCD, then print the Hundreds and Tens digits (No Ones!)
+        # Example: If calc_val=95 -> Hundreds=0, Tens=9 -> Print "1009" to the screen.
         hundreds = (calc_val // 100) % 10
         tens = (calc_val // 10) % 10
 
-        # LCD'de görünen stringi oluşturup sayıya çeviriyoruz
+        # We create the string displayed on the LCD and convert it to a number.
         final_str = f"10{hundreds}{tens}"
         self.outdoorPressure = float(final_str)
 
@@ -175,7 +196,7 @@ class CurtainControlSystemConnection(HomeAutomationSystemConnection):
         if val_int > 100: val_int = 100
 
         try:
-            # 2-Byte Protokolü (Header + Data)
+            # 2-Byte Protocol (Header + Data)
             self.send_byte(0xC0)  # Header High
             time.sleep(0.05)
             self.send_byte(val_int)  # Data High
@@ -207,7 +228,7 @@ def main_menu():
     ac_system = AirConditionerSystemConnection(PORT_AC)
     curtain_system = CurtainControlSystemConnection(PORT_CURTAIN)
 
-    # Hata almamak için try-connect
+    # To avoid errors, try-connect
     try:
         ac_system.open()
     except:
@@ -226,7 +247,7 @@ def main_menu():
         print("2. Curtain Control (Board #2)")
         print("3. Exit")
 
-        choice = input("Seçiminiz: ")
+        choice = input("Your choice: ")
 
         if choice == '1':
             air_conditioner_menu(ac_system)
@@ -237,7 +258,7 @@ def main_menu():
             curtain_system.close()
             break
         else:
-            print("Geçersiz seçim!")
+            print("Invalid choice!")
 
 
 def air_conditioner_menu(system):
@@ -255,13 +276,13 @@ def air_conditioner_menu(system):
         print("1. Enter the desired temperature")
         print("2. Return")
 
-        choice = input("Seçim: ")
+        choice = input("Choice: ")
         if choice == '1':
             try:
                 val = float(input("Enter Desired Temp: "))
                 system.setDesiredTemp(val)
             except ValueError:
-                print("Hata: Sayı giriniz.")
+                print("Error: Please enter a number.")
         elif choice == '2':
             break
         time.sleep(0.5)
@@ -283,20 +304,21 @@ def curtain_control_menu(system):
         print("1. Enter the desired curtain status")
         print("2. Return")
 
-        choice = input("Seçim: ")
+        choice = input("Choice: ")
         if choice == '1':
             try:
                 val = float(input("Enter Desired Curtain % (0-100): "))
                 if 0 <= val <= 100:
                     system.setCurtainStatus(val)
                 else:
-                    print("0-100 arası giriniz.")
+                    print("Enter a number between 0 and 100.")
             except ValueError:
-                print("Hata: Sayı giriniz.")
+                print("Error: Please enter a number.")
         elif choice == '2':
             break
         time.sleep(0.5)
 
 
 if __name__ == "__main__":
+
     main_menu()
