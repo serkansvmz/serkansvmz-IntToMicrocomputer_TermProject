@@ -137,6 +137,10 @@ class CurtainControlSystemConnection(HomeAutomationSystemConnection):
         self.lightIntensity = 0.0
 
     def update(self):
+        # ÖNEMLİ: Eski verileri temizle ki taze veri gelsin
+        if self.ser and self.ser.is_open:
+            self.ser.reset_input_buffer()
+
         # 1. Curtain Status
         self.send_byte(0x02)
         c_int = self.read_byte()
@@ -151,33 +155,21 @@ class CurtainControlSystemConnection(HomeAutomationSystemConnection):
         t_frac = self.read_byte()
         self.outdoorTemperature = float(f"{t_int}.{t_frac}")
 
-        # 3. Outdoor Pressure 
+        # 3. Outdoor Pressure
         self.send_byte(0x06)  # Get High
         p_int = self.read_byte()
         self.send_byte(0x05)  # Get Low
         p_frac = self.read_byte()
 
-        # --- PIC Assembly Simulation Algorithm ---
-        # PIC code: It experiences an 8-bit overflow while performing the (Raw * 1.5) operation. 
-        # We are doing the same thing:raw_val = p_int
+        # Hesaplama Algoritması
+        raw_val = p_int
         calc_val = int(raw_val * 1.5)
-
-        # 8-bit Overflow Simulation
         calc_val = calc_val % 256
-
-        # PIC Code: If greater than 150, set it to 150.
-        if calc_val > 150:
-            calc_val = 150
-
-        # PIC Code: Add 50
+        if calc_val > 150: calc_val = 150
         calc_val += 50
 
-        # PIC Code: Print "10" to the LCD, then print the Hundreds and Tens digits (No Ones!)
-        # Example: If calc_val=95 -> Hundreds=0, Tens=9 -> Print "1009" to the screen.
         hundreds = (calc_val // 100) % 10
         tens = (calc_val // 10) % 10
-
-        # We create the string displayed on the LCD and convert it to a number.
         final_str = f"10{hundreds}{tens}"
         self.outdoorPressure = float(final_str)
 
@@ -196,12 +188,10 @@ class CurtainControlSystemConnection(HomeAutomationSystemConnection):
         if val_int > 100: val_int = 100
 
         try:
-            # 2-Byte Protocol (Header + Data)
             self.send_byte(0xC0)  # Header High
             time.sleep(0.05)
             self.send_byte(val_int)  # Data High
             time.sleep(0.05)
-
             self.send_byte(0x80)  # Header Low
             time.sleep(0.05)
             self.send_byte(val_frac)  # Data Low
@@ -290,35 +280,38 @@ def air_conditioner_menu(system):
 
 def curtain_control_menu(system):
     while True:
+        # Verileri güncelle
         system.update()
+
         print("\n" + "-" * 40)
         print("   CURTAIN CONTROL MENU")
         print("-" * 40)
         print(f"Outdoor Temperature: {system.getOutdoorTemp()} °C")
-        print(f"Outdoor Pressure: {system.getOutdoorPress()} hPa")
-        print(f"Curtain Status: {system.curtainStatus} %")
-        print(f"Light Intensity: {system.getLightIntensity()} Lux")
-        print(f"Connection Port: COM11")
-        print(f"Connection Baudrate: 9600")
+        print(f"Outdoor Pressure:    {system.getOutdoorPress()} hPa")
+        print(f"Curtain Status:      {system.curtainStatus} %")
+        print(f"Light Intensity:     {system.getLightIntensity()} Lux")
         print("-" * 40)
         print("1. Enter the desired curtain status")
-        print("2. Return")
+        print("2. Return (veya Yenilemek için Enter)")
 
-        choice = input("Choice: ")
+        choice = input("Seçim: ")
+
         if choice == '1':
             try:
                 val = float(input("Enter Desired Curtain % (0-100): "))
                 if 0 <= val <= 100:
                     system.setCurtainStatus(val)
+                    print("Komut gönderildi, bekleniyor...")
+                    time.sleep(1)  # PIC'in işlemesi için zaman tanı
                 else:
-                    print("Enter a number between 0 and 100.")
+                    print("0-100 arası giriniz.")
             except ValueError:
-                print("Error: Please enter a number.")
+                print("Hata: Sayı giriniz.")
         elif choice == '2':
             break
-        time.sleep(0.5)
+
+        # Döngü başa dönerken ekran yenilenecek
 
 
 if __name__ == "__main__":
-
     main_menu()
